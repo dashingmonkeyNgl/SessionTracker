@@ -123,6 +123,7 @@ local lastInput      = tick()
 local afkStartTick   = nil
 local antiAfkEnabled = settings.antiAfkEnabled
 local frozen         = false   -- never restore frozen=true on re-exec (unsafe)
+local queueOnTeleport = false  -- Queue on Teleport toggle state
 local savedWalkSpeed = nil
 local unloaded       = false
 local panelVisible   = true
@@ -549,6 +550,61 @@ track(platBtn.MouseButton1Click:Connect(function()
     hideBtn.Visible = (platform == "Mobile")
 end))
 
+-- Queue on Teleport toggle (under Platform toggle)
+local queueLabel = Instance.new("TextLabel", mainView)
+queueLabel.Size                  = UDim2.new(0, 130, 0, 20)
+queueLabel.Position              = UDim2.new(0, 14, 0, 180)
+queueLabel.BackgroundTransparency= 1
+queueLabel.Font                  = Enum.Font.Gotham
+queueLabel.TextSize              = 13
+queueLabel.TextColor3            = Color3.fromRGB(225, 226, 232)
+queueLabel.TextXAlignment        = Enum.TextXAlignment.Left
+queueLabel.Text                  = "Queue on Teleport:"
+
+local queueBtn = Instance.new("TextButton", mainView)
+queueBtn.Size             = UDim2.new(0, 92, 0, 20)
+queueBtn.Position         = UDim2.new(1, -100, 0, 180)
+queueBtn.BackgroundColor3 = Color3.fromRGB(90, 46, 46)
+queueBtn.BorderSizePixel  = 0
+queueBtn.Font             = Enum.Font.GothamBold
+queueBtn.TextSize         = 12
+queueBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+queueBtn.AutoButtonColor  = true
+queueBtn.Text             = "Queue: OFF"
+Instance.new("UICorner", queueBtn).CornerRadius = UDim.new(0, 6)
+
+local function updateQueueVisual()
+    if queueOnTeleport then
+        queueBtn.Text             = "Queue: ON"
+        queueBtn.BackgroundColor3 = Color3.fromRGB(46, 90, 60)
+    else
+        queueBtn.Text             = "Queue: OFF"
+        queueBtn.BackgroundColor3 = Color3.fromRGB(90, 46, 46)
+    end
+end
+updateQueueVisual()
+
+track(queueBtn.MouseButton1Click:Connect(function()
+    queueOnTeleport = not queueOnTeleport
+    updateQueueVisual()
+    if queueOnTeleport then
+        -- Verify a queue function exists before promising the user it'll work
+        local q = queue_on_teleport or queueonteleport
+        if not q and type(syn) == "table" then q = syn.queue_on_teleport end
+        if not q and type(getgenv) == "function" then
+            local g = getgenv()
+            if g then q = g.queue_on_teleport or g.queueonteleport end
+        end
+        if q then
+            notify("Queue on Teleport enabled", Color3.fromRGB(140, 230, 160))
+        else
+            notify("Queue on Teleport: not supported by this executor", Color3.fromRGB(255, 140, 140))
+        end
+    else
+        notify("Queue on Teleport disabled", Color3.fromRGB(160, 162, 170))
+    end
+end))
+
 --// ─────────────── Logs view ───────────────
 local logsView = Instance.new("Frame", frame)
 logsView.Name             = "LogsView"
@@ -793,6 +849,41 @@ local function parseResponse(resp)
     -- If body is nil but resp is a string, the whole response might be the body
     if not body and type(resp) == "string" then body = resp; status = 200 end
     return body, status, nil
+end
+
+--// ─────────────── Queue on Teleport helper ───────────────
+-- Finds a supported queue-on-teleport function across executors.
+-- Returns the function or nil if none is available.
+local function getQueueFunction()
+    local q = queue_on_teleport or queueonteleport
+    if not q and type(syn) == "table" then q = syn.queue_on_teleport end
+    if not q and type(getgenv) == "function" then
+        local g = getgenv()
+        if g then q = g.queue_on_teleport or g.queueonteleport end
+    end
+    return q
+end
+
+-- The loader code to re-execute after a teleport.
+local QUEUE_LOADER = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/dashingmonkeyNgl/SessionTracker/main/anti.lua"))()'
+
+-- Call this before any teleport initiated by THIS script.
+-- If the toggle is on, queues the loader for auto-execution in the new server.
+local function queueScript()
+    if not queueOnTeleport then return true end
+    local q = getQueueFunction()
+    if not q then
+        notify("Queue on Teleport not supported by this executor", Color3.fromRGB(255, 140, 140))
+        return false
+    end
+    local ok, err = pcall(q, QUEUE_LOADER)
+    if ok then
+        notify("Script queued for re-execution", Color3.fromRGB(140, 230, 160))
+        return true
+    else
+        notify("Queue failed: " .. tostring(err):sub(1, 50), Color3.fromRGB(255, 140, 140))
+        return false
+    end
 end
 
 --// ─────────────── Notification toast ───────────────
@@ -1132,6 +1223,8 @@ track(joinBtn.MouseButton1Click:Connect(function()
     joinStatus.TextColor3 = Color3.fromRGB(140, 200, 255)
     notify("Joining server...", Color3.fromRGB(140, 200, 255))
 
+    queueScript()
+
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(pid, jidRaw, player)
     end)
@@ -1189,6 +1282,8 @@ track(rejoinBtn.MouseButton1Click:Connect(function()
     rejoinBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
     notify("Rejoining current server...", Color3.fromRGB(140, 200, 255))
 
+    queueScript()
+
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(pid, jid, player)
     end)
@@ -1245,6 +1340,8 @@ track(hopBtn.MouseButton1Click:Connect(function()
 
         hopBtn.Text = "Joining..."
         notify("Joining server (" .. target.playing .. " players)...", Color3.fromRGB(140, 200, 255))
+
+        queueScript()
 
         local ok, err2 = pcall(function()
             TeleportService:TeleportToPlaceInstance(pid, target.id, player)
@@ -1308,6 +1405,8 @@ track(smallestBtn.MouseButton1Click:Connect(function()
 
         smallestBtn.Text = "Joining..."
         notify("Joining smallest server (" .. smallest.playing .. " players)...", Color3.fromRGB(140, 200, 255))
+
+        queueScript()
 
         local ok, err2 = pcall(function()
             TeleportService:TeleportToPlaceInstance(pid, smallest.id, player)
