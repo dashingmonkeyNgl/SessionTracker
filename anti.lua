@@ -1,11 +1,14 @@
 --[[ ============================================================
     Session & AFK Tracker  -  Executor UI
     ------------------------------------------------------------
-    Sidebar UI with three tabs:
-      - Main  : injected-since timer, last input, AFK timer,
-                Anti-AFK toggle, Freeze toggle, Platform toggle
-      - Logs  : scrolling log of every anti-AFK right-click
-      - Info  : credits + freeze warning
+    Sidebar UI with four tabs:
+      - Main   : injected-since timer, last input, AFK timer,
+                 Anti-AFK toggle, Freeze toggle, Platform toggle
+      - Logs   : scrolling log of every anti-AFK right-click,
+                 with a Clear button to wipe all entries
+      - Server : current Place ID / Job ID / server link (with copy
+                 buttons) + Join Server form (Place ID + Job ID only)
+      - Info   : credits + freeze warning
 
     Platform modes (auto-detected, switchable on Main tab):
       - PC    : RightShift hides/shows the panel
@@ -41,6 +44,7 @@ local UIS         = game:GetService("UserInputService")
 local Run         = game:GetService("RunService")
 local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
+local TeleportService = game:GetService("TeleportService")
 local player      = Players.LocalPlayer
 
 --// ─────────────── Re-execute support ───────────────
@@ -62,7 +66,7 @@ local function defaultSettings()
         platform       = "PC",      -- "PC" or "Mobile"
         antiAfkEnabled = true,
         frozen         = false,
-        panelPos       = { x = 16, y = 0.5, oy = -115 }, -- fallback
+        panelPos       = { x = 16, y = 0.5, oy = -135 }, -- fallback
     }
 end
 
@@ -173,14 +177,14 @@ screen.Parent         = gui
 
 local frame = Instance.new("Frame")
 frame.Name             = "Panel"
-frame.Size             = UDim2.new(0, 320, 0, 230)
+frame.Size             = UDim2.new(0, 320, 0, 270)
 -- Restore saved position if available
 do
     local p = settings.panelPos
     if p and type(p.x) == "number" and type(p.y) == "number" then
-        frame.Position = UDim2.new(0, p.x, p.y, p.oy or -115)
+        frame.Position = UDim2.new(0, p.x, p.y, p.oy or -135)
     else
-        frame.Position = UDim2.new(0, 16, 0.5, -115)
+        frame.Position = UDim2.new(0, 16, 0.5, -135)
     end
 end
 frame.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
@@ -240,9 +244,10 @@ local function makeTabBtn(name, text, y)
     return btn
 end
 
-local mainBtn = makeTabBtn("MainTab", "Main", 30)
-local logsBtn = makeTabBtn("LogsTab", "Logs", 64)
-local infoBtn = makeTabBtn("InfoTab", "Info", 98)
+local mainBtn   = makeTabBtn("MainTab",   "Main",   30)
+local logsBtn   = makeTabBtn("LogsTab",   "Logs",   64)
+local serverBtn = makeTabBtn("ServerTab", "Server", 98)
+local infoBtn   = makeTabBtn("InfoTab",   "Info",   132)
 
 -- Hide button (always visible in sidebar, essential for mobile)
 local hideBtn = Instance.new("TextButton")
@@ -285,6 +290,7 @@ local function paintTab(btn, active)
 end
 paintTab(mainBtn, true)
 paintTab(logsBtn, false)
+paintTab(serverBtn, false)
 paintTab(infoBtn, false)
 
 --// ─────────────── Floating reopen button (shown when panel hidden) ───────────────
@@ -721,28 +727,268 @@ for _, line in ipairs(infoLines) do
     infoY = infoY + line.size + 6
 end
 
+--// ─────────────── Server view ───────────────
+local serverView = Instance.new("Frame", frame)
+serverView.Name             = "ServerView"
+serverView.Size             = UDim2.new(1, -SIDEBAR_W, 1, 0)
+serverView.Position         = UDim2.new(0, SIDEBAR_W, 0, 0)
+serverView.BackgroundTransparency = 1
+serverView.Visible          = false
+
+local serverTitle = Instance.new("TextLabel", serverView)
+serverTitle.Size                  = UDim2.new(1, -24, 0, 24)
+serverTitle.Position              = UDim2.new(0, 12, 0, 6)
+serverTitle.BackgroundTransparency= 1
+serverTitle.Font                  = Enum.Font.GothamBold
+serverTitle.TextSize              = 14
+serverTitle.TextColor3            = Color3.fromRGB(255, 255, 255)
+serverTitle.TextXAlignment        = Enum.TextXAlignment.Left
+serverTitle.Text                  = "Server"
+
+local serverAccent = Instance.new("Frame", serverView)
+serverAccent.Size             = UDim2.new(0, 3, 1, -16)
+serverAccent.Position         = UDim2.new(0, 0, 0, 8)
+serverAccent.BackgroundColor3 = Color3.fromRGB(120, 160, 255)
+serverAccent.BorderSizePixel  = 0
+Instance.new("UICorner", serverAccent).CornerRadius = UDim.new(1, 0)
+
+-- Helper: build a labeled row with a value box + copy button
+local function makeServerRow(y, labelText, valueText)
+    local label = Instance.new("TextLabel", serverView)
+    label.Size                  = UDim2.new(1, -24, 0, 14)
+    label.Position              = UDim2.new(0, 14, 0, y)
+    label.BackgroundTransparency= 1
+    label.Font                  = Enum.Font.GothamBold
+    label.TextSize              = 10
+    label.TextColor3            = Color3.fromRGB(160, 162, 170)
+    label.TextXAlignment        = Enum.TextXAlignment.Left
+    label.Text                  = labelText
+
+    local valueBox = Instance.new("TextLabel", serverView)
+    valueBox.Size             = UDim2.new(1, -88, 0, 22)
+    valueBox.Position         = UDim2.new(0, 14, 0, y + 16)
+    valueBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
+    valueBox.BorderSizePixel  = 0
+    valueBox.Font             = Enum.Font.Code
+    valueBox.TextSize         = 11
+    valueBox.TextColor3       = Color3.fromRGB(225, 226, 232)
+    valueBox.TextXAlignment   = Enum.TextXAlignment.Left
+    valueBox.TextTruncate     = Enum.TextTruncate.AtEnd
+    valueBox.Text             = valueText
+    local pad = Instance.new("UIPadding", valueBox)
+    pad.PaddingLeft = UDim.new(0, 8)
+    Instance.new("UICorner", valueBox).CornerRadius = UDim.new(0, 5)
+
+    local copyBtn = Instance.new("TextButton", serverView)
+    copyBtn.Size             = UDim2.new(0, 60, 0, 22)
+    copyBtn.Position         = UDim2.new(1, -74, 0, y + 16)
+    copyBtn.BackgroundColor3 = Color3.fromRGB(40, 50, 70)
+    copyBtn.BorderSizePixel  = 0
+    copyBtn.Font             = Enum.Font.GothamBold
+    copyBtn.TextSize         = 11
+    copyBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+    copyBtn.AutoButtonColor  = true
+    copyBtn.Text             = "Copy"
+    Instance.new("UICorner", copyBtn).CornerRadius = UDim.new(0, 5)
+
+    track(copyBtn.MouseButton1Click:Connect(function()
+        if setclipboard then
+            setclipboard(valueBox.Text)
+            copyBtn.Text = "Copied!"
+            task.delay(1.2, function()
+                if copyBtn and copyBtn.Parent then copyBtn.Text = "Copy" end
+            end)
+        else
+            copyBtn.Text = "No cb"
+            task.delay(1.2, function()
+                if copyBtn and copyBtn.Parent then copyBtn.Text = "Copy" end
+            end)
+        end
+    end))
+
+    return valueBox
+end
+
+-- Section: Current Server
+local csHeader = Instance.new("TextLabel", serverView)
+csHeader.Size                  = UDim2.new(1, -24, 0, 14)
+csHeader.Position              = UDim2.new(0, 14, 0, 30)
+csHeader.BackgroundTransparency= 1
+csHeader.Font                  = Enum.Font.GothamBold
+csHeader.TextSize              = 11
+csHeader.TextColor3            = Color3.fromRGB(120, 160, 255)
+csHeader.TextXAlignment        = Enum.TextXAlignment.Left
+csHeader.Text                  = "CURRENT SERVER"
+
+local placeIdStr = tostring(game.PlaceId)
+local jobIdStr   = (game.JobId == "") and "(none - singleplayer)" or game.JobId
+local linkStr    = "https://www.roblox.com/home?placeId=" .. placeIdStr
+                   .. (game.JobId ~= "" and ("&gameId=" .. game.JobId) or "")
+
+makeServerRow(42, "PLACE ID",   placeIdStr)
+makeServerRow(80, "JOB ID",     jobIdStr)
+makeServerRow(118, "SERVER LINK", linkStr)
+
+-- Section: Join Server
+local jsHeader = Instance.new("TextLabel", serverView)
+jsHeader.Size                  = UDim2.new(1, -24, 0, 14)
+jsHeader.Position              = UDim2.new(0, 14, 0, 162)
+jsHeader.BackgroundTransparency= 1
+jsHeader.Font                  = Enum.Font.GothamBold
+jsHeader.TextSize              = 11
+jsHeader.TextColor3            = Color3.fromRGB(120, 160, 255)
+jsHeader.TextXAlignment        = Enum.TextXAlignment.Left
+jsHeader.Text                  = "JOIN SERVER"
+
+-- Place ID input
+local joinPlaceLabel = Instance.new("TextLabel", serverView)
+joinPlaceLabel.Size                  = UDim2.new(1, -24, 0, 12)
+joinPlaceLabel.Position              = UDim2.new(0, 14, 0, 176)
+joinPlaceLabel.BackgroundTransparency= 1
+joinPlaceLabel.Font                  = Enum.Font.GothamBold
+joinPlaceLabel.TextSize              = 10
+joinPlaceLabel.TextColor3            = Color3.fromRGB(160, 162, 170)
+joinPlaceLabel.TextXAlignment        = Enum.TextXAlignment.Left
+joinPlaceLabel.Text                  = "PLACE ID"
+
+local joinPlaceBox = Instance.new("TextBox", serverView)
+joinPlaceBox.Size             = UDim2.new(1, -28, 0, 20)
+joinPlaceBox.Position         = UDim2.new(0, 14, 0, 188)
+joinPlaceBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
+joinPlaceBox.BorderSizePixel  = 0
+joinPlaceBox.Font             = Enum.Font.Code
+joinPlaceBox.TextSize         = 11
+joinPlaceBox.TextColor3       = Color3.fromRGB(225, 226, 232)
+joinPlaceBox.PlaceholderText  = "e.g. 920587237"
+joinPlaceBox.PlaceholderColor3= Color3.fromRGB(120, 122, 130)
+joinPlaceBox.Text             = ""
+joinPlaceBox.ClearTextOnFocus = false
+joinPlaceBox.TextXAlignment   = Enum.TextXAlignment.Left
+local jpPad = Instance.new("UIPadding", joinPlaceBox)
+jpPad.PaddingLeft = UDim.new(0, 8)
+Instance.new("UICorner", joinPlaceBox).CornerRadius = UDim.new(0, 5)
+
+-- Job ID input
+local joinJobLabel = Instance.new("TextLabel", serverView)
+joinJobLabel.Size                  = UDim2.new(1, -24, 0, 12)
+joinJobLabel.Position              = UDim2.new(0, 14, 0, 208)
+joinJobLabel.BackgroundTransparency= 1
+joinJobLabel.Font                  = Enum.Font.GothamBold
+joinJobLabel.TextSize              = 10
+joinJobLabel.TextColor3            = Color3.fromRGB(160, 162, 170)
+joinJobLabel.TextXAlignment        = Enum.TextXAlignment.Left
+joinJobLabel.Text                  = "JOB ID"
+
+local joinJobBox = Instance.new("TextBox", serverView)
+joinJobBox.Size             = UDim2.new(1, -28, 0, 20)
+joinJobBox.Position         = UDim2.new(0, 14, 0, 220)
+joinJobBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
+joinJobBox.BorderSizePixel  = 0
+joinJobBox.Font             = Enum.Font.Code
+joinJobBox.TextSize         = 11
+joinJobBox.TextColor3       = Color3.fromRGB(225, 226, 232)
+joinJobBox.PlaceholderText  = "server instance id"
+joinJobBox.PlaceholderColor3= Color3.fromRGB(120, 122, 130)
+joinJobBox.Text             = ""
+joinJobBox.ClearTextOnFocus = false
+joinJobBox.TextXAlignment   = Enum.TextXAlignment.Left
+local jjPad = Instance.new("UIPadding", joinJobBox)
+jjPad.PaddingLeft = UDim.new(0, 8)
+Instance.new("UICorner", joinJobBox).CornerRadius = UDim.new(0, 5)
+
+-- Join button + status label (bottom row)
+local joinStatus = Instance.new("TextLabel", serverView)
+joinStatus.Size                  = UDim2.new(1, -110, 0, 18)
+joinStatus.Position              = UDim2.new(0, 14, 1, -28)
+joinStatus.BackgroundTransparency= 1
+joinStatus.Font                  = Enum.Font.Gotham
+joinStatus.TextSize              = 10
+joinStatus.TextColor3            = Color3.fromRGB(160, 162, 170)
+joinStatus.TextXAlignment        = Enum.TextXAlignment.Left
+joinStatus.Text                  = ""
+
+local joinBtn = Instance.new("TextButton", serverView)
+joinBtn.Size             = UDim2.new(0, 80, 0, 20)
+joinBtn.Position         = UDim2.new(1, -94, 1, -28)
+joinBtn.BackgroundColor3 = Color3.fromRGB(46, 90, 60)
+joinBtn.BorderSizePixel  = 0
+joinBtn.Font             = Enum.Font.GothamBold
+joinBtn.TextSize         = 12
+joinBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+joinBtn.AutoButtonColor  = true
+joinBtn.Text             = "Join Server"
+Instance.new("UICorner", joinBtn).CornerRadius = UDim.new(0, 5)
+
+track(joinBtn.MouseButton1Click:Connect(function()
+    local pidRaw = joinPlaceBox.Text
+    local jidRaw = joinJobBox.Text
+
+    -- Validate
+    local pid = tonumber(pidRaw)
+    if not pid or pid <= 0 then
+        joinStatus.Text = "Invalid Place ID"
+        joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+        return
+    end
+    if jidRaw == "" or string.len(jidRaw) < 1 then
+        joinStatus.Text = "Job ID required"
+        joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+        return
+    end
+
+    joinStatus.Text = "Joining..."
+    joinStatus.TextColor3 = Color3.fromRGB(140, 200, 255)
+
+    local ok, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(pid, jidRaw, player)
+    end)
+
+    if not ok then
+        joinStatus.Text = "Failed: " .. tostring(err):sub(1, 40)
+        joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+    else
+        joinStatus.Text = "Teleporting..."
+        joinStatus.TextColor3 = Color3.fromRGB(140, 230, 160)
+    end
+end))
+
 --// ─────────────── Tab switching ───────────────
 local function showTab(tabName)
     if tabName == "Main" then
         mainView.Visible = true
         logsView.Visible = false
+        serverView.Visible = false
         infoView.Visible = false
         paintTab(mainBtn, true)
         paintTab(logsBtn, false)
+        paintTab(serverBtn, false)
         paintTab(infoBtn, false)
     elseif tabName == "Logs" then
         mainView.Visible = false
         logsView.Visible = true
+        serverView.Visible = false
         infoView.Visible = false
         paintTab(mainBtn, false)
         paintTab(logsBtn, true)
+        paintTab(serverBtn, false)
+        paintTab(infoBtn, false)
+    elseif tabName == "Server" then
+        mainView.Visible = false
+        logsView.Visible = false
+        serverView.Visible = true
+        infoView.Visible = false
+        paintTab(mainBtn, false)
+        paintTab(logsBtn, false)
+        paintTab(serverBtn, true)
         paintTab(infoBtn, false)
     elseif tabName == "Info" then
         mainView.Visible = false
         logsView.Visible = false
+        serverView.Visible = false
         infoView.Visible = true
         paintTab(mainBtn, false)
         paintTab(logsBtn, false)
+        paintTab(serverBtn, false)
         paintTab(infoBtn, true)
     end
     activeTab = tabName
@@ -750,6 +996,7 @@ end
 
 track(mainBtn.MouseButton1Click:Connect(function() showTab("Main") end))
 track(logsBtn.MouseButton1Click:Connect(function() showTab("Logs") end))
+track(serverBtn.MouseButton1Click:Connect(function() showTab("Server") end))
 track(infoBtn.MouseButton1Click:Connect(function() showTab("Info") end))
 showTab("Main")
 
