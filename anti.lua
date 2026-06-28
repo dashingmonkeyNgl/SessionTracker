@@ -822,8 +822,10 @@ csHeader.Text                  = "CURRENT SERVER"
 
 local placeIdStr = tostring(game.PlaceId)
 local jobIdStr   = (game.JobId == "") and "(none - singleplayer)" or game.JobId
-local linkStr    = "https://www.roblox.com/home?placeId=" .. placeIdStr
-                   .. (game.JobId ~= "" and ("&gameId=" .. game.JobId) or "")
+-- Proper Roblox server join link format:
+-- https://www.roblox.com/games/start?placeId=PLACE_ID&gameInstanceId=JOB_ID
+local linkStr    = "https://www.roblox.com/games/start?placeId=" .. placeIdStr
+                   .. (game.JobId ~= "" and ("&gameInstanceId=" .. game.JobId) or "")
 
 makeServerRow(42, "PLACE ID",   placeIdStr)
 makeServerRow(80, "JOB ID",     jobIdStr)
