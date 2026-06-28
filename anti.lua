@@ -7,7 +7,8 @@
       - Logs   : scrolling log of every anti-AFK right-click,
                  with a Clear button to wipe all entries
       - Server : current Place ID / Job ID / server link (with copy
-                 buttons) + Join Server form (Place ID + Job ID only)
+                 buttons), Join Server form (Place ID + Job ID only),
+                 and Server Management (Rejoin, Server Hop, Smallest Server)
       - Info   : credits + freeze warning
 
     Platform modes (auto-detected, switchable on Main tab):
@@ -595,13 +596,17 @@ scroll.ScrollBarThickness          = 4
 scroll.ScrollBarImageColor3        = Color3.fromRGB(120, 160, 255)
 scroll.ScrollBarImageTransparency  = 0.3
 scroll.CanvasSize                  = UDim2.new(0, 0, 0, 0)
-scroll.AutomaticCanvasSize         = Enum.AutomaticSize.Y
 scroll.ScrollingDirection          = Enum.ScrollingDirection.Y
 
 local listLayout = Instance.new("UIListLayout", scroll)
 listLayout.SortOrder         = Enum.SortOrder.LayoutOrder
 listLayout.Padding           = UDim.new(0, 4)
 listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+
+-- Auto-resize canvas when content changes
+listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    scroll.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y)
+end)
 
 local emptyLbl = Instance.new("TextLabel", scroll)
 emptyLbl.Size                  = UDim2.new(1, -8, 0, 24)
@@ -736,12 +741,16 @@ infoScroll.ScrollBarThickness          = 4
 infoScroll.ScrollBarImageColor3        = Color3.fromRGB(120, 160, 255)
 infoScroll.ScrollBarImageTransparency  = 0.3
 infoScroll.CanvasSize                  = UDim2.new(0, 0, 0, 0)
-infoScroll.AutomaticCanvasSize         = Enum.AutomaticSize.Y
 infoScroll.ScrollingDirection          = Enum.ScrollingDirection.Y
 
 local infoLayout = Instance.new("UIListLayout", infoScroll)
 infoLayout.SortOrder         = Enum.SortOrder.LayoutOrder
 infoLayout.Padding           = UDim.new(0, 0)
+
+-- Auto-resize canvas when content changes
+infoLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    infoScroll.CanvasSize = UDim2.new(0, 0, 0, infoLayout.AbsoluteContentSize.Y)
+end)
 
 local infoY = 0
 for i, line in ipairs(infoLines) do
@@ -757,6 +766,127 @@ for i, line in ipairs(infoLines) do
     lbl.LayoutOrder           = i
     lbl.Text                  = line.text
     infoY = infoY + line.size + 6
+end
+
+--// ─────────────── HTTP request helper (executor-agnostic) ───────────────
+local function httpRequest(options)
+    local req = http_request or request
+    if not req and type(syn) == "table" then req = syn.request end
+    if not req and type(fluxus) == "table" then req = fluxus.request end
+    if not req then
+        return nil, "No HTTP function available on this executor"
+    end
+    local ok, result = pcall(req, options)
+    if not ok then
+        return nil, tostring(result)
+    end
+    return result
+end
+
+-- Extract body and status from an HTTP response, handling different executor formats
+local function parseResponse(resp)
+    if not resp then return nil, 0, "No response" end
+    -- Body can be under .Body, .body, .BodyString, or just a string
+    local body = resp.Body or resp.body or resp.BodyString or (type(resp) == "string" and resp or nil)
+    -- Status code can be under .StatusCode, .status, .Status, .code
+    local status = resp.StatusCode or resp.status or resp.Status or resp.code or 0
+    -- If body is nil but resp is a string, the whole response might be the body
+    if not body and type(resp) == "string" then body = resp; status = 200 end
+    return body, status, nil
+end
+
+--// ─────────────── Notification toast ───────────────
+local toast = Instance.new("TextLabel")
+toast.Name = "Toast"
+toast.Size = UDim2.new(1, -SIDEBAR_W - 24, 0, 26)
+toast.Position = UDim2.new(0, SIDEBAR_W + 12, 1, -32)
+toast.BackgroundColor3 = Color3.fromRGB(40, 42, 50)
+toast.BorderSizePixel = 0
+toast.Font = Enum.Font.GothamBold
+toast.TextSize = 11
+toast.TextColor3 = Color3.fromRGB(255, 255, 255)
+toast.TextXAlignment = Enum.TextXAlignment.Center
+toast.TextYAlignment = Enum.TextYAlignment.Center
+toast.Visible = false
+toast.ZIndex = 100
+toast.Parent = frame
+Instance.new("UICorner", toast).CornerRadius = UDim.new(0, 5)
+local toastStroke = Instance.new("UIStroke", toast)
+toastStroke.Color = Color3.fromRGB(120, 160, 255)
+toastStroke.Thickness = 1
+toastStroke.Transparency = 0.5
+
+local toastTask = nil
+local function notify(text, color)
+    if not toast or not toast.Parent then return end
+    toast.Text = text
+    toast.TextColor3 = color or Color3.fromRGB(255, 255, 255)
+    toast.Visible = true
+    if toastTask then pcall(function() task.cancel(toastTask) end) end
+    toastTask = task.delay(4, function()
+        if toast and toast.Parent then toast.Visible = false end
+    end)
+end
+
+--// ─────────────── Server fetch helper (with pagination) ───────────────
+-- Returns: servers (table), errorMsg (string or nil)
+-- Handles both API formats:
+--   Old: {"servers": [...], "nextPageCursor": "..."}
+--   New: {"data": [...], "nextPageCursor": "..."}
+local function fetchServers(placeId, maxPages)
+    local servers = {}
+    local cursor = nil
+    local pages = maxPages or 10
+    for page = 1, pages do
+        local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?limit=100"
+        if cursor then url = url .. "&cursor=" .. cursor end
+        local resp, err = httpRequest({
+            Url = url,
+            Method = "GET",
+            Headers = {
+                ["Accept"] = "application/json",
+                ["User-Agent"] = "Roblox/WinInet",
+            }
+        })
+        if not resp then
+            return servers, "HTTP failed: " .. tostring(err):sub(1, 80)
+        end
+        local body, status = parseResponse(resp)
+        if status ~= 200 then
+            return servers, "HTTP " .. tostring(status) .. (page == 1 and " (may be rate-limited)" or "")
+        end
+        if not body or body == "" then
+            return servers, "Empty response body"
+        end
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok then
+            local preview = tostring(body):gsub("%s+", " "):sub(1, 60)
+            return servers, "Not JSON: " .. preview
+        end
+        if type(data) ~= "table" then
+            return servers, "JSON is not a table"
+        end
+        -- Handle both "servers" (old) and "data" (new) keys
+        local serverList = data.servers or data.data
+        if not serverList then
+            if data.errors and data.errors[1] then
+                return servers, "API: " .. tostring(data.errors[1].message or "unknown error")
+            end
+            local keys = {}
+            for k in pairs(data) do table.insert(keys, tostring(k)) end
+            local preview = tostring(body):gsub("%s+", " "):sub(1, 80)
+            return servers, "No server list. Keys: [" .. table.concat(keys, ",") .. "]"
+        end
+        for _, s in ipairs(serverList) do
+            table.insert(servers, s)
+        end
+        -- Handle both "nextPageCursor" formats
+        local nextCursor = data.nextPageCursor
+        if not nextCursor or nextCursor == "" or nextCursor == "null" then break end
+        cursor = nextCursor
+        task.wait(0.5) -- avoid rate limiting
+    end
+    return servers, nil
 end
 
 --// ─────────────── Server view ───────────────
@@ -784,11 +914,28 @@ serverAccent.BackgroundColor3 = Color3.fromRGB(120, 160, 255)
 serverAccent.BorderSizePixel  = 0
 Instance.new("UICorner", serverAccent).CornerRadius = UDim.new(1, 0)
 
+-- Scrollable content container
+local serverScroll = Instance.new("ScrollingFrame", serverView)
+serverScroll.Size                        = UDim2.new(1, -16, 1, -36)
+serverScroll.Position                    = UDim2.new(0, 8, 0, 32)
+serverScroll.BackgroundTransparency      = 1
+serverScroll.BorderSizePixel             = 0
+serverScroll.ScrollBarThickness          = 4
+serverScroll.ScrollBarImageColor3        = Color3.fromRGB(120, 160, 255)
+serverScroll.ScrollBarImageTransparency  = 0.3
+serverScroll.CanvasSize                  = UDim2.new(0, 0, 0, 0)
+serverScroll.ScrollingDirection          = Enum.ScrollingDirection.Y
+
+local serverContent = Instance.new("Frame", serverScroll)
+serverContent.Size             = UDim2.new(1, -12, 0, 400)
+serverContent.Position         = UDim2.new(0, 0, 0, 0)
+serverContent.BackgroundTransparency = 1
+
 -- Helper: build a labeled row with a value box + copy button
 local function makeServerRow(y, labelText, valueText)
-    local label = Instance.new("TextLabel", serverView)
-    label.Size                  = UDim2.new(1, -24, 0, 14)
-    label.Position              = UDim2.new(0, 14, 0, y)
+    local label = Instance.new("TextLabel", serverContent)
+    label.Size                  = UDim2.new(1, -16, 0, 14)
+    label.Position              = UDim2.new(0, 6, 0, y)
     label.BackgroundTransparency= 1
     label.Font                  = Enum.Font.GothamBold
     label.TextSize              = 10
@@ -796,9 +943,9 @@ local function makeServerRow(y, labelText, valueText)
     label.TextXAlignment        = Enum.TextXAlignment.Left
     label.Text                  = labelText
 
-    local valueBox = Instance.new("TextLabel", serverView)
-    valueBox.Size             = UDim2.new(1, -88, 0, 22)
-    valueBox.Position         = UDim2.new(0, 14, 0, y + 16)
+    local valueBox = Instance.new("TextLabel", serverContent)
+    valueBox.Size             = UDim2.new(1, -80, 0, 22)
+    valueBox.Position         = UDim2.new(0, 6, 0, y + 16)
     valueBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
     valueBox.BorderSizePixel  = 0
     valueBox.Font             = Enum.Font.Code
@@ -811,9 +958,9 @@ local function makeServerRow(y, labelText, valueText)
     pad.PaddingLeft = UDim.new(0, 8)
     Instance.new("UICorner", valueBox).CornerRadius = UDim.new(0, 5)
 
-    local copyBtn = Instance.new("TextButton", serverView)
+    local copyBtn = Instance.new("TextButton", serverContent)
     copyBtn.Size             = UDim2.new(0, 60, 0, 22)
-    copyBtn.Position         = UDim2.new(1, -74, 0, y + 16)
+    copyBtn.Position         = UDim2.new(1, -66, 0, y + 16)
     copyBtn.BackgroundColor3 = Color3.fromRGB(40, 50, 70)
     copyBtn.BorderSizePixel  = 0
     copyBtn.Font             = Enum.Font.GothamBold
@@ -842,9 +989,9 @@ local function makeServerRow(y, labelText, valueText)
 end
 
 -- Section: Current Server
-local csHeader = Instance.new("TextLabel", serverView)
-csHeader.Size                  = UDim2.new(1, -24, 0, 14)
-csHeader.Position              = UDim2.new(0, 14, 0, 30)
+local csHeader = Instance.new("TextLabel", serverContent)
+csHeader.Size                  = UDim2.new(1, -16, 0, 14)
+csHeader.Position              = UDim2.new(0, 6, 0, 0)
 csHeader.BackgroundTransparency= 1
 csHeader.Font                  = Enum.Font.GothamBold
 csHeader.TextSize              = 11
@@ -854,19 +1001,17 @@ csHeader.Text                  = "CURRENT SERVER"
 
 local placeIdStr = tostring(game.PlaceId)
 local jobIdStr   = (game.JobId == "") and "(none - singleplayer)" or game.JobId
--- Proper Roblox server join link format:
--- https://www.roblox.com/games/start?placeId=PLACE_ID&gameInstanceId=JOB_ID
 local linkStr    = "https://www.roblox.com/games/start?placeId=" .. placeIdStr
                    .. (game.JobId ~= "" and ("&gameInstanceId=" .. game.JobId) or "")
 
-makeServerRow(42, "PLACE ID",   placeIdStr)
-makeServerRow(80, "JOB ID",     jobIdStr)
-makeServerRow(118, "SERVER LINK", linkStr)
+makeServerRow(14, "PLACE ID",   placeIdStr)
+makeServerRow(52, "JOB ID",     jobIdStr)
+makeServerRow(90, "SERVER LINK", linkStr)
 
 -- Note under server link
-local linkNote = Instance.new("TextLabel", serverView)
-linkNote.Size                  = UDim2.new(1, -24, 0, 14)
-linkNote.Position              = UDim2.new(0, 14, 0, 156)
+local linkNote = Instance.new("TextLabel", serverContent)
+linkNote.Size                  = UDim2.new(1, -16, 0, 14)
+linkNote.Position              = UDim2.new(0, 6, 0, 128)
 linkNote.BackgroundTransparency= 1
 linkNote.Font                  = Enum.Font.Gotham
 linkNote.TextSize              = 9
@@ -876,9 +1021,9 @@ linkNote.TextWrapped           = true
 linkNote.Text                  = "Note: Roblox may redirect to another server."
 
 -- Section: Join Server
-local jsHeader = Instance.new("TextLabel", serverView)
-jsHeader.Size                  = UDim2.new(1, -24, 0, 14)
-jsHeader.Position              = UDim2.new(0, 14, 0, 176)
+local jsHeader = Instance.new("TextLabel", serverContent)
+jsHeader.Size                  = UDim2.new(1, -16, 0, 14)
+jsHeader.Position              = UDim2.new(0, 6, 0, 150)
 jsHeader.BackgroundTransparency= 1
 jsHeader.Font                  = Enum.Font.GothamBold
 jsHeader.TextSize              = 11
@@ -887,9 +1032,9 @@ jsHeader.TextXAlignment        = Enum.TextXAlignment.Left
 jsHeader.Text                  = "JOIN SERVER"
 
 -- Place ID input
-local joinPlaceLabel = Instance.new("TextLabel", serverView)
-joinPlaceLabel.Size                  = UDim2.new(1, -24, 0, 12)
-joinPlaceLabel.Position              = UDim2.new(0, 14, 0, 190)
+local joinPlaceLabel = Instance.new("TextLabel", serverContent)
+joinPlaceLabel.Size                  = UDim2.new(1, -16, 0, 12)
+joinPlaceLabel.Position              = UDim2.new(0, 6, 0, 166)
 joinPlaceLabel.BackgroundTransparency= 1
 joinPlaceLabel.Font                  = Enum.Font.GothamBold
 joinPlaceLabel.TextSize              = 10
@@ -897,9 +1042,9 @@ joinPlaceLabel.TextColor3            = Color3.fromRGB(160, 162, 170)
 joinPlaceLabel.TextXAlignment        = Enum.TextXAlignment.Left
 joinPlaceLabel.Text                  = "PLACE ID"
 
-local joinPlaceBox = Instance.new("TextBox", serverView)
-joinPlaceBox.Size             = UDim2.new(1, -28, 0, 20)
-joinPlaceBox.Position         = UDim2.new(0, 14, 0, 202)
+local joinPlaceBox = Instance.new("TextBox", serverContent)
+joinPlaceBox.Size             = UDim2.new(1, -18, 0, 20)
+joinPlaceBox.Position         = UDim2.new(0, 6, 0, 178)
 joinPlaceBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
 joinPlaceBox.BorderSizePixel  = 0
 joinPlaceBox.Font             = Enum.Font.Code
@@ -915,9 +1060,9 @@ jpPad.PaddingLeft = UDim.new(0, 8)
 Instance.new("UICorner", joinPlaceBox).CornerRadius = UDim.new(0, 5)
 
 -- Job ID input
-local joinJobLabel = Instance.new("TextLabel", serverView)
-joinJobLabel.Size                  = UDim2.new(1, -24, 0, 12)
-joinJobLabel.Position              = UDim2.new(0, 14, 0, 222)
+local joinJobLabel = Instance.new("TextLabel", serverContent)
+joinJobLabel.Size                  = UDim2.new(1, -16, 0, 12)
+joinJobLabel.Position              = UDim2.new(0, 6, 0, 202)
 joinJobLabel.BackgroundTransparency= 1
 joinJobLabel.Font                  = Enum.Font.GothamBold
 joinJobLabel.TextSize              = 10
@@ -925,9 +1070,9 @@ joinJobLabel.TextColor3            = Color3.fromRGB(160, 162, 170)
 joinJobLabel.TextXAlignment        = Enum.TextXAlignment.Left
 joinJobLabel.Text                  = "JOB ID"
 
-local joinJobBox = Instance.new("TextBox", serverView)
-joinJobBox.Size             = UDim2.new(1, -28, 0, 20)
-joinJobBox.Position         = UDim2.new(0, 14, 0, 234)
+local joinJobBox = Instance.new("TextBox", serverContent)
+joinJobBox.Size             = UDim2.new(1, -18, 0, 20)
+joinJobBox.Position         = UDim2.new(0, 6, 0, 214)
 joinJobBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
 joinJobBox.BorderSizePixel  = 0
 joinJobBox.Font             = Enum.Font.Code
@@ -942,10 +1087,10 @@ local jjPad = Instance.new("UIPadding", joinJobBox)
 jjPad.PaddingLeft = UDim.new(0, 8)
 Instance.new("UICorner", joinJobBox).CornerRadius = UDim.new(0, 5)
 
--- Join button + status label (bottom row)
-local joinStatus = Instance.new("TextLabel", serverView)
-joinStatus.Size                  = UDim2.new(1, -110, 0, 18)
-joinStatus.Position              = UDim2.new(0, 14, 1, -22)
+-- Join button + status
+local joinStatus = Instance.new("TextLabel", serverContent)
+joinStatus.Size                  = UDim2.new(1, -100, 0, 20)
+joinStatus.Position              = UDim2.new(0, 6, 0, 240)
 joinStatus.BackgroundTransparency= 1
 joinStatus.Font                  = Enum.Font.Gotham
 joinStatus.TextSize              = 10
@@ -953,13 +1098,13 @@ joinStatus.TextColor3            = Color3.fromRGB(160, 162, 170)
 joinStatus.TextXAlignment        = Enum.TextXAlignment.Left
 joinStatus.Text                  = ""
 
-local joinBtn = Instance.new("TextButton", serverView)
-joinBtn.Size             = UDim2.new(0, 80, 0, 20)
-joinBtn.Position         = UDim2.new(1, -94, 1, -22)
+local joinBtn = Instance.new("TextButton", serverContent)
+joinBtn.Size             = UDim2.new(0, 88, 0, 20)
+joinBtn.Position         = UDim2.new(1, -94, 0, 240)
 joinBtn.BackgroundColor3 = Color3.fromRGB(46, 90, 60)
 joinBtn.BorderSizePixel  = 0
 joinBtn.Font             = Enum.Font.GothamBold
-joinBtn.TextSize         = 12
+joinBtn.TextSize         = 11
 joinBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
 joinBtn.AutoButtonColor  = true
 joinBtn.Text             = "Join Server"
@@ -969,21 +1114,23 @@ track(joinBtn.MouseButton1Click:Connect(function()
     local pidRaw = joinPlaceBox.Text
     local jidRaw = joinJobBox.Text
 
-    -- Validate
     local pid = tonumber(pidRaw)
     if not pid or pid <= 0 then
         joinStatus.Text = "Invalid Place ID"
         joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+        notify("Invalid Place ID", Color3.fromRGB(255, 140, 140))
         return
     end
     if jidRaw == "" or string.len(jidRaw) < 1 then
         joinStatus.Text = "Job ID required"
         joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+        notify("Job ID required", Color3.fromRGB(255, 140, 140))
         return
     end
 
     joinStatus.Text = "Joining..."
     joinStatus.TextColor3 = Color3.fromRGB(140, 200, 255)
+    notify("Joining server...", Color3.fromRGB(140, 200, 255))
 
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(pid, jidRaw, player)
@@ -992,11 +1139,192 @@ track(joinBtn.MouseButton1Click:Connect(function()
     if not ok then
         joinStatus.Text = "Failed: " .. tostring(err):sub(1, 40)
         joinStatus.TextColor3 = Color3.fromRGB(255, 140, 140)
+        notify("Join failed: " .. tostring(err):sub(1, 50), Color3.fromRGB(255, 140, 140))
     else
         joinStatus.Text = "Teleporting..."
         joinStatus.TextColor3 = Color3.fromRGB(140, 230, 160)
+        notify("Teleporting...", Color3.fromRGB(140, 230, 160))
     end
 end))
+
+--// ─────────────── Section: Server Management ───────────────
+local smHeader = Instance.new("TextLabel", serverContent)
+smHeader.Size                  = UDim2.new(1, -16, 0, 14)
+smHeader.Position              = UDim2.new(0, 6, 0, 270)
+smHeader.BackgroundTransparency= 1
+smHeader.Font                  = Enum.Font.GothamBold
+smHeader.TextSize              = 11
+smHeader.TextColor3            = Color3.fromRGB(120, 160, 255)
+smHeader.TextXAlignment        = Enum.TextXAlignment.Left
+smHeader.Text                  = "SERVER MANAGEMENT"
+
+-- Helper to create a full-width action button
+local function makeActionBtn(y, text, color)
+    local btn = Instance.new("TextButton", serverContent)
+    btn.Size             = UDim2.new(1, -18, 0, 26)
+    btn.Position         = UDim2.new(0, 6, 0, y)
+    btn.BackgroundColor3 = color
+    btn.BorderSizePixel  = 0
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 12
+    btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+    btn.AutoButtonColor  = true
+    btn.Text             = text
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+    return btn
+end
+
+-- Rejoin button
+local rejoinBtn = makeActionBtn(290, "Rejoin Current Server", Color3.fromRGB(50, 70, 110))
+
+track(rejoinBtn.MouseButton1Click:Connect(function()
+    local pid = game.PlaceId
+    local jid = game.JobId
+    if jid == "" then
+        notify("No server to rejoin (singleplayer)", Color3.fromRGB(255, 140, 140))
+        return
+    end
+
+    rejoinBtn.Text = "Rejoining..."
+    rejoinBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    notify("Rejoining current server...", Color3.fromRGB(140, 200, 255))
+
+    local ok, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(pid, jid, player)
+    end)
+
+    if not ok then
+        rejoinBtn.Text = "Rejoin Current Server"
+        rejoinBtn.BackgroundColor3 = Color3.fromRGB(50, 70, 110)
+        notify("Rejoin failed: " .. tostring(err):sub(1, 50), Color3.fromRGB(255, 140, 140))
+    else
+        notify("Teleporting to current server...", Color3.fromRGB(140, 230, 160))
+    end
+end))
+
+-- Server Hop button
+local hopBtn = makeActionBtn(322, "Server Hop", Color3.fromRGB(70, 90, 50))
+
+track(hopBtn.MouseButton1Click:Connect(function()
+    local pid = game.PlaceId
+    local currentJid = game.JobId
+
+    hopBtn.Text = "Searching..."
+    hopBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    notify("Searching for another server...", Color3.fromRGB(140, 200, 255))
+
+    task.spawn(function()
+        local servers, err = fetchServers(pid, 5)
+        local target = nil
+
+        if not err and #servers > 0 then
+            for _, s in ipairs(servers) do
+                -- Roblox API uses "id", "playing", "maxPlayers" (some use playerCapacity)
+                local sId = s.id or s.Id
+                local sPlaying = tonumber(s.playing) or tonumber(s.Playing) or 0
+                local sMax = tonumber(s.maxPlayers) or tonumber(s.MaxPlayers) or tonumber(s.playerCapacity) or 100
+                if sId and sId ~= currentJid and sPlaying < sMax then
+                    target = { id = sId, playing = sPlaying }
+                    break
+                end
+            end
+        end
+
+        if not target then
+            hopBtn.Text = "Server Hop"
+            hopBtn.BackgroundColor3 = Color3.fromRGB(70, 90, 50)
+            if err then
+                notify("Error: " .. err, Color3.fromRGB(255, 140, 140))
+            elseif #servers == 0 then
+                notify("No servers returned by API", Color3.fromRGB(255, 140, 140))
+            else
+                notify("No other available server found", Color3.fromRGB(255, 140, 140))
+            end
+            return
+        end
+
+        hopBtn.Text = "Joining..."
+        notify("Joining server (" .. target.playing .. " players)...", Color3.fromRGB(140, 200, 255))
+
+        local ok, err2 = pcall(function()
+            TeleportService:TeleportToPlaceInstance(pid, target.id, player)
+        end)
+
+        if not ok then
+            hopBtn.Text = "Server Hop"
+            hopBtn.BackgroundColor3 = Color3.fromRGB(70, 90, 50)
+            notify("Server hop failed: " .. tostring(err2):sub(1, 50), Color3.fromRGB(255, 140, 140))
+        else
+            notify("Teleporting to new server...", Color3.fromRGB(140, 230, 160))
+        end
+    end)
+end))
+
+-- Smallest Server button
+local smallestBtn = makeActionBtn(354, "Join Smallest Server", Color3.fromRGB(90, 70, 50))
+
+track(smallestBtn.MouseButton1Click:Connect(function()
+    local pid = game.PlaceId
+    local currentJid = game.JobId
+
+    smallestBtn.Text = "Searching all pages..."
+    smallestBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    notify("Fetching server list (this may take a moment)...", Color3.fromRGB(140, 200, 255))
+
+    task.spawn(function()
+        -- Fetch up to 10 pages to find the truly smallest server
+        local servers, err = fetchServers(pid, 10)
+        local smallest = nil
+        local smallestCount = math.huge
+
+        if not err and #servers > 0 then
+            for _, s in ipairs(servers) do
+                -- Handle different field name casings
+                local sId = s.id or s.Id
+                local sPlaying = tonumber(s.playing) or tonumber(s.Playing) or 0
+                local sMax = tonumber(s.maxPlayers) or tonumber(s.MaxPlayers) or tonumber(s.playerCapacity) or 100
+                -- Skip current server, full servers, and unavailable servers
+                if sId and sId ~= currentJid and sPlaying < sMax and sPlaying >= 0 then
+                    if sPlaying < smallestCount then
+                        smallestCount = sPlaying
+                        smallest = { id = sId, playing = sPlaying }
+                    end
+                end
+            end
+        end
+
+        if not smallest then
+            smallestBtn.Text = "Join Smallest Server"
+            smallestBtn.BackgroundColor3 = Color3.fromRGB(90, 70, 50)
+            if err then
+                notify("Error: " .. err, Color3.fromRGB(255, 140, 140))
+            elseif #servers == 0 then
+                notify("No servers returned by API", Color3.fromRGB(255, 140, 140))
+            else
+                notify("No suitable server found after checking all pages", Color3.fromRGB(255, 140, 140))
+            end
+            return
+        end
+
+        smallestBtn.Text = "Joining..."
+        notify("Joining smallest server (" .. smallest.playing .. " players)...", Color3.fromRGB(140, 200, 255))
+
+        local ok, err2 = pcall(function()
+            TeleportService:TeleportToPlaceInstance(pid, smallest.id, player)
+        end)
+
+        if not ok then
+            smallestBtn.Text = "Join Smallest Server"
+            smallestBtn.BackgroundColor3 = Color3.fromRGB(90, 70, 50)
+            notify("Join failed: " .. tostring(err2):sub(1, 50), Color3.fromRGB(255, 140, 140))
+        else
+            notify("Teleporting to smallest server...", Color3.fromRGB(140, 230, 160))
+        end
+    end)
+end))
+
+-- Set server scroll canvas to fit all content (smallest button ends at y=380)
+serverScroll.CanvasSize = UDim2.new(0, 0, 0, 390)
 
 --// ─────────────── Tab switching ───────────────
 local function showTab(tabName)
@@ -1138,8 +1466,7 @@ track(UIS.InputChanged:Connect(function(input, gpe)
     if unloaded then return end
     local t = input.UserInputType
     if t == Enum.UserInputType.MouseWheel
-    or t == Enum.UserInputType.Touch
-    or t == Enum.UserInputType.GamepadAxis then
+    or t == Enum.UserInputType.Touch then
         bump()
     end
 end))
