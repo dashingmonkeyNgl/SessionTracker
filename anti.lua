@@ -66,7 +66,7 @@ local function defaultSettings()
         platform       = "PC",      -- "PC" or "Mobile"
         antiAfkEnabled = true,
         frozen         = false,
-        panelPos       = { x = 16, y = 0.5, oy = -135 }, -- fallback
+        panelPos       = { x = 16, y = 0.5, oy = -140 }, -- fallback
     }
 end
 
@@ -177,14 +177,14 @@ screen.Parent         = gui
 
 local frame = Instance.new("Frame")
 frame.Name             = "Panel"
-frame.Size             = UDim2.new(0, 320, 0, 270)
+frame.Size             = UDim2.new(0, 320, 0, 280)
 -- Restore saved position if available
 do
     local p = settings.panelPos
     if p and type(p.x) == "number" and type(p.y) == "number" then
-        frame.Position = UDim2.new(0, p.x, p.y, p.oy or -135)
+        frame.Position = UDim2.new(0, p.x, p.y, p.oy or -140)
     else
-        frame.Position = UDim2.new(0, 16, 0.5, -135)
+        frame.Position = UDim2.new(0, 16, 0.5, -140)
     end
 end
 frame.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
@@ -710,19 +710,51 @@ local infoLines = {
     { text = "Freeze anchors your character.",            color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
     { text = "May get you kicked if the game",            color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
     { text = "has an anti-cheat. Use with caution.",      color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "",                        color = Color3.fromRGB(0, 0, 0),       bold = false, size = 6 },
+    { text = "SERVER LINK",             color = Color3.fromRGB(255, 200, 100), bold = true,  size = 11 },
+    { text = "The generated server link may",             color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "not put you in the exact same",             color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "server. Roblox's new browser flow",         color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "can redirect you to a different",           color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "instance.",                                 color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "",                        color = Color3.fromRGB(0, 0, 0),       bold = false, size = 6 },
+    { text = "JOIN SERVER",             color = Color3.fromRGB(255, 200, 100), bold = true,  size = 11 },
+    { text = "Some games restrict way of",                color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "joining. You may see an error like",        color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = '"attempted to teleport to a place',         color = Color3.fromRGB(200, 200, 210), bold = false, size = 11 },
+    { text = 'that is restricted" if the game',           color = Color3.fromRGB(200, 200, 210), bold = false, size = 11 },
+    { text = "blocks this method.",                       color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
 }
 
-local infoY = 34
-for _, line in ipairs(infoLines) do
-    local lbl = Instance.new("TextLabel", infoView)
-    lbl.Size                  = UDim2.new(1, -24, 0, line.size + 6)
-    lbl.Position              = UDim2.new(0, 14, 0, infoY)
+-- Scrollable container for info content
+local infoScroll = Instance.new("ScrollingFrame", infoView)
+infoScroll.Size                        = UDim2.new(1, -24, 1, -40)
+infoScroll.Position                    = UDim2.new(0, 12, 0, 34)
+infoScroll.BackgroundTransparency      = 1
+infoScroll.BorderSizePixel             = 0
+infoScroll.ScrollBarThickness          = 4
+infoScroll.ScrollBarImageColor3        = Color3.fromRGB(120, 160, 255)
+infoScroll.ScrollBarImageTransparency  = 0.3
+infoScroll.CanvasSize                  = UDim2.new(0, 0, 0, 0)
+infoScroll.AutomaticCanvasSize         = Enum.AutomaticSize.Y
+infoScroll.ScrollingDirection          = Enum.ScrollingDirection.Y
+
+local infoLayout = Instance.new("UIListLayout", infoScroll)
+infoLayout.SortOrder         = Enum.SortOrder.LayoutOrder
+infoLayout.Padding           = UDim.new(0, 0)
+
+local infoY = 0
+for i, line in ipairs(infoLines) do
+    local lbl = Instance.new("TextLabel", infoScroll)
+    lbl.Size                  = UDim2.new(1, -8, 0, line.size + 6)
     lbl.BackgroundTransparency= 1
     lbl.Font                  = line.bold and Enum.Font.GothamBold or Enum.Font.Gotham
     lbl.TextSize              = line.size
     lbl.TextColor3            = line.color
     lbl.TextXAlignment        = Enum.TextXAlignment.Left
-    lbl.TextYAlignment        = Enum.TextYAlignment.Center
+    lbl.TextYAlignment        = Enum.TextYAlignment.Top
+    lbl.TextWrapped           = true
+    lbl.LayoutOrder           = i
     lbl.Text                  = line.text
     infoY = infoY + line.size + 6
 end
@@ -831,10 +863,22 @@ makeServerRow(42, "PLACE ID",   placeIdStr)
 makeServerRow(80, "JOB ID",     jobIdStr)
 makeServerRow(118, "SERVER LINK", linkStr)
 
+-- Note under server link
+local linkNote = Instance.new("TextLabel", serverView)
+linkNote.Size                  = UDim2.new(1, -24, 0, 14)
+linkNote.Position              = UDim2.new(0, 14, 0, 156)
+linkNote.BackgroundTransparency= 1
+linkNote.Font                  = Enum.Font.Gotham
+linkNote.TextSize              = 9
+linkNote.TextColor3            = Color3.fromRGB(180, 160, 100)
+linkNote.TextXAlignment        = Enum.TextXAlignment.Left
+linkNote.TextWrapped           = true
+linkNote.Text                  = "Note: Roblox may redirect to another server."
+
 -- Section: Join Server
 local jsHeader = Instance.new("TextLabel", serverView)
 jsHeader.Size                  = UDim2.new(1, -24, 0, 14)
-jsHeader.Position              = UDim2.new(0, 14, 0, 162)
+jsHeader.Position              = UDim2.new(0, 14, 0, 176)
 jsHeader.BackgroundTransparency= 1
 jsHeader.Font                  = Enum.Font.GothamBold
 jsHeader.TextSize              = 11
@@ -845,7 +889,7 @@ jsHeader.Text                  = "JOIN SERVER"
 -- Place ID input
 local joinPlaceLabel = Instance.new("TextLabel", serverView)
 joinPlaceLabel.Size                  = UDim2.new(1, -24, 0, 12)
-joinPlaceLabel.Position              = UDim2.new(0, 14, 0, 176)
+joinPlaceLabel.Position              = UDim2.new(0, 14, 0, 190)
 joinPlaceLabel.BackgroundTransparency= 1
 joinPlaceLabel.Font                  = Enum.Font.GothamBold
 joinPlaceLabel.TextSize              = 10
@@ -855,7 +899,7 @@ joinPlaceLabel.Text                  = "PLACE ID"
 
 local joinPlaceBox = Instance.new("TextBox", serverView)
 joinPlaceBox.Size             = UDim2.new(1, -28, 0, 20)
-joinPlaceBox.Position         = UDim2.new(0, 14, 0, 188)
+joinPlaceBox.Position         = UDim2.new(0, 14, 0, 202)
 joinPlaceBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
 joinPlaceBox.BorderSizePixel  = 0
 joinPlaceBox.Font             = Enum.Font.Code
@@ -873,7 +917,7 @@ Instance.new("UICorner", joinPlaceBox).CornerRadius = UDim.new(0, 5)
 -- Job ID input
 local joinJobLabel = Instance.new("TextLabel", serverView)
 joinJobLabel.Size                  = UDim2.new(1, -24, 0, 12)
-joinJobLabel.Position              = UDim2.new(0, 14, 0, 208)
+joinJobLabel.Position              = UDim2.new(0, 14, 0, 222)
 joinJobLabel.BackgroundTransparency= 1
 joinJobLabel.Font                  = Enum.Font.GothamBold
 joinJobLabel.TextSize              = 10
@@ -883,7 +927,7 @@ joinJobLabel.Text                  = "JOB ID"
 
 local joinJobBox = Instance.new("TextBox", serverView)
 joinJobBox.Size             = UDim2.new(1, -28, 0, 20)
-joinJobBox.Position         = UDim2.new(0, 14, 0, 220)
+joinJobBox.Position         = UDim2.new(0, 14, 0, 234)
 joinJobBox.BackgroundColor3 = Color3.fromRGB(28, 30, 36)
 joinJobBox.BorderSizePixel  = 0
 joinJobBox.Font             = Enum.Font.Code
@@ -901,7 +945,7 @@ Instance.new("UICorner", joinJobBox).CornerRadius = UDim.new(0, 5)
 -- Join button + status label (bottom row)
 local joinStatus = Instance.new("TextLabel", serverView)
 joinStatus.Size                  = UDim2.new(1, -110, 0, 18)
-joinStatus.Position              = UDim2.new(0, 14, 1, -28)
+joinStatus.Position              = UDim2.new(0, 14, 1, -22)
 joinStatus.BackgroundTransparency= 1
 joinStatus.Font                  = Enum.Font.Gotham
 joinStatus.TextSize              = 10
@@ -911,7 +955,7 @@ joinStatus.Text                  = ""
 
 local joinBtn = Instance.new("TextButton", serverView)
 joinBtn.Size             = UDim2.new(0, 80, 0, 20)
-joinBtn.Position         = UDim2.new(1, -94, 1, -28)
+joinBtn.Position         = UDim2.new(1, -94, 1, -22)
 joinBtn.BackgroundColor3 = Color3.fromRGB(46, 90, 60)
 joinBtn.BorderSizePixel  = 0
 joinBtn.Font             = Enum.Font.GothamBold
