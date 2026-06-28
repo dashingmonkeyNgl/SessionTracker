@@ -869,6 +869,8 @@ local QUEUE_LOADER = 'loadstring(game:HttpGet("https://raw.githubusercontent.com
 
 -- Call this before any teleport initiated by THIS script.
 -- If the toggle is on, queues the loader for auto-execution in the new server.
+-- Runs the queue call on a separate thread so it cannot block the teleport
+-- (some executors' queue functions yield, which would freeze the button).
 local function queueScript()
     if not queueOnTeleport then return true end
     local q = getQueueFunction()
@@ -876,14 +878,16 @@ local function queueScript()
         notify("Queue on Teleport not supported by this executor", Color3.fromRGB(255, 140, 140))
         return false
     end
-    local ok, err = pcall(q, QUEUE_LOADER)
-    if ok then
-        notify("Script queued for re-execution", Color3.fromRGB(140, 230, 160))
-        return true
-    else
-        notify("Queue failed: " .. tostring(err):sub(1, 50), Color3.fromRGB(255, 140, 140))
-        return false
-    end
+    -- Run the queue call on a separate thread so it doesn't block the teleport
+    task.spawn(function()
+        local ok, err = pcall(q, QUEUE_LOADER)
+        if ok then
+            notify("Script queued for re-execution", Color3.fromRGB(140, 230, 160))
+        else
+            notify("Queue failed: " .. tostring(err):sub(1, 50), Color3.fromRGB(255, 140, 140))
+        end
+    end)
+    return true
 end
 
 --// ─────────────── Notification toast ───────────────
