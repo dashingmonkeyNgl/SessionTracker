@@ -1,47 +1,161 @@
 --[[ ============================================================
     Session & AFK Tracker  -  Executor UI
     ------------------------------------------------------------
-    Sidebar UI with two tabs:
-      - Main  : in-game time, last input, AFK timer,
-                Anti-AFK toggle, Freeze toggle
-      - Logs  : scrolling log of every anti-AFK right-click,
-                each entry shows "Sent right click: just now"
-                and then counts up every second
+    Sidebar UI with three tabs:
+      - Main  : injected-since timer, last input, AFK timer,
+                Anti-AFK toggle, Freeze toggle, Platform toggle
+      - Logs  : scrolling log of every anti-AFK right-click
+      - Info  : credits + freeze warning
 
-    Freeze toggle:
-      - Anchors HumanoidRootPart (no movement, no knockback,
-        no physics interaction at all)
-      - Zeros WalkSpeed as a backup
-      - Re-applies automatically on respawn
+    Platform modes (auto-detected, switchable on Main tab):
+      - PC    : RightShift hides/shows the panel
+      - Mobile: Hide button in the sidebar; when hidden, a small
+                draggable floating button appears to reopen the panel
+
+    Settings saved to file (survive re-execute):
+      - platform (PC / Mobile)
+      - antiAfkEnabled
+      - panel position
+      (Freeze is NEVER auto-restored - always starts OFF for safety)
+
+    Re-execute support:
+      - The script cleans up any previous instance on startup, so it's
+        safe to re-execute. For auto re-execution across game hops,
+        place this script in your executor's autoexec folder.
 
     - Mouse MOVEMENT is ignored (you can wiggle freely)
     - Built-in anti-AFK (VirtualUser Button2 on player.Idled)
-    - Press RightShift to hide / show the panel
     - Unload button on sidebar fully tears everything down
     - No console output
 --============================================================ ]]
 
 --// ─────────────── Config ───────────────
 local AFK_THRESHOLD = 5
-local TOGGLE_KEY    = Enum.KeyCode.RightShift   -- hide / show panel
+local TOGGLE_KEY    = Enum.KeyCode.RightShift   -- hide / show panel (PC)
 local MAX_LOGS      = 100
+local SETTINGS_FILE = "AfkTrackerSettings.json"
 
 --// ─────────────── Services ───────────────
 local Players     = game:GetService("Players")
 local UIS         = game:GetService("UserInputService")
 local Run         = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 local VirtualUser = game:GetService("VirtualUser")
 local player      = Players.LocalPlayer
-local gui         = player:WaitForChild("PlayerGui")
+
+--// ─────────────── Re-execute support ───────────────
+-- If a previous instance is running, unload it first so we don't end up
+-- with duplicate panels. This makes the script safe to re-execute manually
+-- OR via an executor's auto-execute folder (which re-runs it on every game join).
+-- To enable auto re-execution across game hops, place this script in your
+-- executor's autoexec folder (Synapse: autoexec/, Krnl: autoexec/, etc.).
+if getgenv and getgenv().AfkTrackerUnload then
+    pcall(getgenv().AfkTrackerUnload)
+    task.wait(0.2)
+end
+
+local gui = player:WaitForChild("PlayerGui")
+
+--// ─────────────── Settings (persistent) ───────────────
+local function defaultSettings()
+    return {
+        platform       = "PC",      -- "PC" or "Mobile"
+        antiAfkEnabled = true,
+        frozen         = false,
+        panelPos       = { x = 16, y = 0.5, oy = -115 }, -- fallback
+    }
+end
+
+local function loadSettings()
+    local s = defaultSettings()
+    if not isfile or not readfile then return s end
+    if not isfile(SETTINGS_FILE) then return s end
+    local ok, data = pcall(function()
+        return HttpService:JSONDecode(readfile(SETTINGS_FILE))
+    end)
+    if not ok or type(data) ~= "table" then return s end
+    -- Merge with defaults so missing keys don't break things
+    for k, v in pairs(data) do s[k] = v end
+    -- Validate platform
+    if s.platform ~= "PC" and s.platform ~= "Mobile" then
+        s.platform = "PC"
+    end
+    return s
+end
+
+local function saveSettings(s)
+    if not writefile then return end
+    pcall(function()
+        writefile(SETTINGS_FILE, HttpService:JSONEncode(s))
+    end)
+end
+
+local settings = loadSettings()
+
+--// ─────────────── Platform detection (only used if no saved setting) ───────────────
+-- We only auto-detect on first run (when no settings file exists).
+-- After that, the saved platform is respected.
+local function detectPlatform()
+    -- TouchEnabled + no mouse = mobile
+    if UIS.TouchEnabled and not UIS.MouseEnabled then
+        return "Mobile"
+    end
+    return "PC"
+end
+
+-- If this is a fresh install (file didn't exist), auto-detect platform
+local isFreshInstall = (not isfile) or (not isfile(SETTINGS_FILE))
+if isFreshInstall then
+    settings.platform = detectPlatform()
+    saveSettings(settings)
+end
+
+local platform = settings.platform   -- "PC" or "Mobile"
 
 --// ─────────────── State ───────────────
 local scriptStart    = tick()
 local lastInput      = tick()
 local afkStartTick   = nil
-local antiAfkEnabled = true
-local frozen         = false
+local antiAfkEnabled = settings.antiAfkEnabled
+local frozen         = false   -- never restore frozen=true on re-exec (unsafe)
 local savedWalkSpeed = nil
 local unloaded       = false
+local panelVisible   = true
+
+-- In-game time: use persistent per-server timestamp
+local gameJoinTime
+do
+    local jobId = game.JobId
+    if jobId == "" then jobId = "singleplayer" end
+    local sessionKey = "AfkTrackerSession_" .. tostring(jobId)
+    local function loadSession()
+        if not isfile or not readfile then return nil end
+        if not isfile(sessionKey) then return nil end
+        local ok, data = pcall(function()
+            return HttpService:JSONDecode(readfile(sessionKey))
+        end)
+        if ok and type(data) == "table" and type(data.joinTime) == "number" then
+            return data.joinTime
+        end
+        return nil
+    end
+    local function saveSession(t)
+        if not writefile then return end
+        pcall(function()
+            writefile(sessionKey, HttpService:JSONEncode({ joinTime = t }))
+        end)
+    end
+    local existing = loadSession()
+    if existing and existing < os.time() then
+        -- We've been in this server before (script re-executed)
+        gameJoinTime = existing
+    else
+        -- First time in this server - best we can do is script start
+        -- Convert tick() to os.time() equivalent for consistency
+        gameJoinTime = os.time()
+        saveSession(gameJoinTime)
+    end
+end
 
 local connections = {}
 local function track(conn)
@@ -59,8 +173,16 @@ screen.Parent         = gui
 
 local frame = Instance.new("Frame")
 frame.Name             = "Panel"
-frame.Size             = UDim2.new(0, 320, 0, 180)
-frame.Position         = UDim2.new(0, 16, 0.5, -90)
+frame.Size             = UDim2.new(0, 320, 0, 230)
+-- Restore saved position if available
+do
+    local p = settings.panelPos
+    if p and type(p.x) == "number" and type(p.y) == "number" then
+        frame.Position = UDim2.new(0, p.x, p.y, p.oy or -115)
+    else
+        frame.Position = UDim2.new(0, 16, 0.5, -115)
+    end
+end
 frame.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
 frame.BackgroundTransparency = 0.05
 frame.BorderSizePixel  = 0
@@ -122,6 +244,22 @@ local mainBtn = makeTabBtn("MainTab", "Main", 30)
 local logsBtn = makeTabBtn("LogsTab", "Logs", 64)
 local infoBtn = makeTabBtn("InfoTab", "Info", 98)
 
+-- Hide button (always visible in sidebar, essential for mobile)
+local hideBtn = Instance.new("TextButton")
+hideBtn.Name             = "HideTab"
+hideBtn.Size             = UDim2.new(1, -12, 0, 24)
+hideBtn.Position         = UDim2.new(0, 6, 1, -58)
+hideBtn.BackgroundColor3 = Color3.fromRGB(40, 42, 50)
+hideBtn.BorderSizePixel  = 0
+hideBtn.Font             = Enum.Font.GothamBold
+hideBtn.TextSize         = 11
+hideBtn.TextColor3       = Color3.fromRGB(200, 202, 210)
+hideBtn.AutoButtonColor  = true
+hideBtn.Text             = "Hide"
+hideBtn.Visible          = (platform == "Mobile")  -- PC uses RightShift instead
+hideBtn.Parent           = sidebar
+Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 6)
+
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Name             = "UnloadTab"
 unloadBtn.Size             = UDim2.new(1, -12, 0, 24)
@@ -148,6 +286,48 @@ end
 paintTab(mainBtn, true)
 paintTab(logsBtn, false)
 paintTab(infoBtn, false)
+
+--// ─────────────── Floating reopen button (shown when panel hidden) ───────────────
+local floatBtn = Instance.new("TextButton")
+floatBtn.Name             = "FloatBtn"
+floatBtn.Size             = UDim2.new(0, 44, 0, 44)
+floatBtn.Position         = UDim2.new(0, 16, 0, 100)
+floatBtn.BackgroundColor3 = Color3.fromRGB(18, 19, 24)
+floatBtn.BackgroundTransparency = 0.1
+floatBtn.BorderSizePixel  = 0
+floatBtn.AutoButtonColor  = true
+floatBtn.Text             = ""
+floatBtn.Visible          = false
+floatBtn.Parent           = screen
+Instance.new("UICorner", floatBtn).CornerRadius = UDim.new(0.5, 0)
+local floatStroke = Instance.new("UIStroke", floatBtn)
+floatStroke.Color        = Color3.fromRGB(120, 160, 255)
+floatStroke.Thickness    = 1.5
+floatStroke.Transparency = 0.3
+
+local floatLogo = Instance.new("TextLabel", floatBtn)
+floatLogo.Size                  = UDim2.new(1, 0, 1, 0)
+floatLogo.BackgroundTransparency= 1
+floatLogo.Font                  = Enum.Font.GothamBold
+floatLogo.TextSize              = 11
+floatLogo.TextColor3            = Color3.fromRGB(120, 160, 255)
+floatLogo.Text                  = "T"
+
+--// ─────────────── Hide / show logic ───────────────
+local function setPanelVisible(v)
+    panelVisible = v
+    frame.Visible = v
+    -- Floating button shows ONLY when panel is hidden
+    floatBtn.Visible = (not v) and (not unloaded)
+end
+
+track(hideBtn.MouseButton1Click:Connect(function()
+    setPanelVisible(false)
+end))
+
+track(floatBtn.MouseButton1Click:Connect(function()
+    setPanelVisible(true)
+end))
 
 --// ─────────────── Main view ───────────────
 local mainView = Instance.new("Frame", frame)
@@ -200,6 +380,8 @@ updateToggleVisual()
 
 track(toggleBtn.MouseButton1Click:Connect(function()
     antiAfkEnabled = not antiAfkEnabled
+    settings.antiAfkEnabled = antiAfkEnabled
+    saveSettings(settings)
     updateToggleVisual()
 end))
 
@@ -228,69 +410,43 @@ end
 updateFreezeVisual()
 
 --// ─────────────── Freeze logic ───────────────
--- Maximum freeze: anchors HRP, zeros WalkSpeed, AND runs a Stepped hook
--- that force-resets the HRP CFrame every frame.
---
--- The Stepped lock is what resists "drag" abilities that move you via
--- CFrame (teleport-style knockback). Anchoring alone won't stop those
--- because the drag script sets CFrame directly. By re-applying our
--- locked CFrame on every Stepped (which fires BEFORE physics each frame),
--- we overwrite whatever the drag set.
---
--- Note: we do NOT touch JumpPower/JumpHeight/Jumping state. Anchoring
--- already prevents jumping (jump = physics force, anchored parts ignore
--- all physics forces), and messing with those values breaks jumping
--- after unfreezing on games that use custom jump systems.
+-- Anchors HRP + Stepped CFrame lock. Does NOT touch WalkSpeed.
+-- Anchoring alone prevents all movement (walking is a physics force,
+-- anchored parts ignore physics). Touching WalkSpeed breaks movement
+-- in games that manage speed themselves (e.g. Tower of Hell).
 local lockedCFrame = nil
 
 local function applyFreezeToCharacter(char)
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
-    local hum = char:FindFirstChildOfClass("Humanoid")
     if not hrp then return end
 
     if frozen then
-        if hum and savedWalkSpeed == nil then
-            savedWalkSpeed = hum.WalkSpeed
-        end
         hrp.Anchored = true
-        if hum then hum.WalkSpeed = 0 end
-        -- Capture the locked position the moment freeze turns on
         lockedCFrame = hrp.CFrame
     else
         hrp.Anchored = false
         lockedCFrame = nil
-        if hum and savedWalkSpeed ~= nil then
-            hum.WalkSpeed = savedWalkSpeed
-        end
     end
 end
 
--- Stepped hook: fires every frame BEFORE physics step.
--- If anything dragged our HRP via CFrame since last frame, this restores it.
--- This is what makes the freeze resist mob drag abilities.
+-- Stepped hook: force-resets HRP CFrame every frame to resist drag abilities
 track(Run.Stepped:Connect(function()
     if unloaded or not frozen then return end
     local char = player.Character
     if not char then return end
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp or not lockedCFrame then return end
-
-    -- Re-anchor (in case a game un-anchored it) and force CFrame back
     if not hrp.Anchored then hrp.Anchored = true end
     hrp.CFrame = lockedCFrame
-
-    -- Also kill any velocity the drag may have imparted
     hrp.AssemblyLinearVelocity  = Vector3.zero
     hrp.AssemblyAngularVelocity = Vector3.zero
 end))
 
 local function setFrozen(state)
     frozen = state
-    -- Reset saved WalkSpeed when turning off so we re-capture next time
-    if not frozen then
-        savedWalkSpeed = nil
-    end
+    -- Note: we intentionally do NOT save frozen to settings.
+    -- Freeze always starts OFF on re-execute for safety.
     if player.Character then
         applyFreezeToCharacter(player.Character)
     end
@@ -303,22 +459,20 @@ end))
 
 -- Re-apply freeze when character respawns
 track(player.CharacterAdded:Connect(function(char)
-    -- Wait for the character's HRP to exist before anchoring
     local hrp = char:WaitForChild("HumanoidRootPart", 5)
     if hrp then
-        task.wait(0.1)  -- let other CharacterAdded handlers settle
+        task.wait(0.1)
         if frozen and not unloaded then
             applyFreezeToCharacter(char)
         end
     end
 end))
 
--- Apply to current character if it already exists
 if player.Character then
     applyFreezeToCharacter(player.Character)
 end
 
---// ─────────────── Stat lines (shifted down to fit Freeze button) ───────────────
+--// ─────────────── Stat lines ───────────────
 local function makeLine(y)
     local lbl = Instance.new("TextLabel", mainView)
     lbl.Size                  = UDim2.new(1, -110, 0, 22)
@@ -332,11 +486,10 @@ local function makeLine(y)
     return lbl
 end
 
-local inGameLbl    = makeLine(58)
-local lastInputLbl = makeLine(82)
-local afkLbl       = makeLine(106)
+local inGameLbl    = makeLine(70)
+local lastInputLbl = makeLine(98)
+local afkLbl       = makeLine(126)
 
--- Footer hint
 local hintLbl = Instance.new("TextLabel", mainView)
 hintLbl.Size                  = UDim2.new(1, -24, 0, 18)
 hintLbl.Position              = UDim2.new(0, 14, 1, -22)
@@ -345,7 +498,49 @@ hintLbl.Font                  = Enum.Font.Gotham
 hintLbl.TextSize              = 10
 hintLbl.TextColor3            = Color3.fromRGB(140, 142, 150)
 hintLbl.TextXAlignment        = Enum.TextXAlignment.Left
-hintLbl.Text                  = "RightShift to hide/show"
+hintLbl.Text                  = (platform == "Mobile") and "Hide btn to minimize" or "RightShift to hide/show"
+
+-- Platform toggle (under AFK for, right-aligned like Anti-AFK/Freeze)
+local platLabel = Instance.new("TextLabel", mainView)
+platLabel.Size                  = UDim2.new(0, 70, 0, 20)
+platLabel.Position              = UDim2.new(0, 14, 0, 156)
+platLabel.BackgroundTransparency= 1
+platLabel.Font                  = Enum.Font.Gotham
+platLabel.TextSize              = 13
+platLabel.TextColor3            = Color3.fromRGB(225, 226, 232)
+platLabel.TextXAlignment        = Enum.TextXAlignment.Left
+platLabel.Text                  = "Platform:"
+
+local platBtn = Instance.new("TextButton", mainView)
+platBtn.Size             = UDim2.new(0, 92, 0, 20)
+platBtn.Position         = UDim2.new(1, -100, 0, 156)
+platBtn.BackgroundColor3 = Color3.fromRGB(30, 32, 40)
+platBtn.BorderSizePixel  = 0
+platBtn.Font             = Enum.Font.GothamBold
+platBtn.TextSize         = 12
+platBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+platBtn.AutoButtonColor  = true
+platBtn.Text             = platform
+Instance.new("UICorner", platBtn).CornerRadius = UDim.new(0, 6)
+
+local function refreshPlatBtn()
+    platBtn.Text             = platform
+    platBtn.BackgroundColor3 = (platform == "Mobile")
+        and Color3.fromRGB(46, 90, 60)
+        or  Color3.fromRGB(46, 60, 90)
+end
+refreshPlatBtn()
+
+track(platBtn.MouseButton1Click:Connect(function()
+    platform = (platform == "PC") and "Mobile" or "PC"
+    settings.platform = platform
+    saveSettings(settings)
+    refreshPlatBtn()
+    hintLbl.Text = (platform == "Mobile")
+        and "Hide btn to minimize"
+        or  "RightShift to hide/show"
+    hideBtn.Visible = (platform == "Mobile")
+end))
 
 --// ─────────────── Logs view ───────────────
 local logsView = Instance.new("Frame", frame)
@@ -356,7 +551,7 @@ logsView.BackgroundTransparency = 1
 logsView.Visible          = false
 
 local logsTitle = Instance.new("TextLabel", logsView)
-logsTitle.Size                  = UDim2.new(1, -24, 0, 24)
+logsTitle.Size                  = UDim2.new(1, -110, 0, 24)
 logsTitle.Position              = UDim2.new(0, 12, 0, 6)
 logsTitle.BackgroundTransparency= 1
 logsTitle.Font                  = Enum.Font.GothamBold
@@ -364,6 +559,19 @@ logsTitle.TextSize              = 14
 logsTitle.TextColor3            = Color3.fromRGB(255, 255, 255)
 logsTitle.TextXAlignment        = Enum.TextXAlignment.Left
 logsTitle.Text                  = "Anti-AFK Logs"
+
+-- Clear button (top-right of logs title row)
+local clearBtn = Instance.new("TextButton", logsView)
+clearBtn.Size             = UDim2.new(0, 60, 0, 20)
+clearBtn.Position         = UDim2.new(1, -68, 0, 8)
+clearBtn.BackgroundColor3 = Color3.fromRGB(80, 50, 30)
+clearBtn.BorderSizePixel  = 0
+clearBtn.Font             = Enum.Font.GothamBold
+clearBtn.TextSize         = 11
+clearBtn.TextColor3       = Color3.fromRGB(255, 255, 255)
+clearBtn.AutoButtonColor  = true
+clearBtn.Text             = "Clear"
+Instance.new("UICorner", clearBtn).CornerRadius = UDim.new(0, 6)
 
 local logsAccent = Instance.new("Frame", logsView)
 logsAccent.Size             = UDim2.new(0, 3, 1, -16)
@@ -444,6 +652,22 @@ local function addLogEntry(ts)
     return entry
 end
 
+-- Clear all log entries
+local function clearLogs()
+    for _, entry in ipairs(logEntries) do
+        if entry.frame then
+            entry.frame:Destroy()
+        end
+    end
+    logEntries = {}
+    logCounter = 0
+    emptyLbl.Visible = true
+end
+
+track(clearBtn.MouseButton1Click:Connect(function()
+    clearLogs()
+end))
+
 --// ─────────────── Info view ───────────────
 local infoView = Instance.new("Frame", frame)
 infoView.Name             = "InfoView"
@@ -477,9 +701,9 @@ local infoLines = {
     { text = "Creator's Discord: twin.e8", color = Color3.fromRGB(120, 160, 255), bold = true, size = 12 },
     { text = "",                        color = Color3.fromRGB(0, 0, 0),       bold = false, size = 6 },
     { text = "WARNING",                 color = Color3.fromRGB(255, 140, 140), bold = true,  size = 12 },
-    { text = "The Freeze feature anchors your character.", color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
-    { text = "If the game has an anti-cheat, this may",     color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
-    { text = "get you kicked. Use with caution.",           color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "Freeze anchors your character.",            color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "May get you kicked if the game",            color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
+    { text = "has an anti-cheat. Use with caution.",      color = Color3.fromRGB(225, 226, 232), bold = false, size = 11 },
 }
 
 local infoY = 34
@@ -534,14 +758,21 @@ local function unload()
     if unloaded then return end
     unloaded = true
 
-    -- If frozen, fully un-freeze so the player isn't stuck after unload
+    -- Save current panel position before destroying
+    if frame then
+        local pos = frame.Position
+        settings.panelPos = {
+            x   = pos.X.Offset,
+            y   = pos.Y.Scale,
+            oy  = pos.Y.Offset,
+        }
+        saveSettings(settings)
+    end
+
+    -- Un-freeze if needed (just un-anchor, don't touch WalkSpeed)
     if frozen and player.Character then
         local hrp = player.Character:FindFirstChild("HumanoidRootPart")
         if hrp then hrp.Anchored = false end
-        local hum = player.Character:FindFirstChildOfClass("Humanoid")
-        if hum and savedWalkSpeed ~= nil then
-            hum.WalkSpeed = savedWalkSpeed
-        end
     end
     frozen = false
     lockedCFrame = nil
@@ -554,9 +785,19 @@ local function unload()
     if screen and screen.Parent then
         screen:Destroy()
     end
+
+    -- Clear global reference so future re-executions know we're gone
+    if getgenv then
+        getgenv().AfkTrackerUnload = nil
+    end
 end
 
 track(unloadBtn.MouseButton1Click:Connect(unload))
+
+-- Register unload in getgenv so future re-executions can clean us up
+if getgenv then
+    getgenv().AfkTrackerUnload = unload
+end
 
 --// ─────────────── Helpers ───────────────
 local function fmt(seconds)
@@ -592,8 +833,11 @@ track(UIS.InputBegan:Connect(function(input, gpe)
         bump()
     end
 
-    if input.KeyCode == TOGGLE_KEY and not UIS:GetFocusedTextBox() then
-        frame.Visible = not frame.Visible
+    -- RightShift toggles panel (PC mode; mobile uses the Hide button)
+    if platform == "PC"
+    and input.KeyCode == TOGGLE_KEY
+    and not UIS:GetFocusedTextBox() then
+        setPanelVisible(not panelVisible)
     end
 end))
 
@@ -621,7 +865,7 @@ track(player.Idled:Connect(function()
     addLogEntry(fireTime)
 end))
 
---// ─────────────── Dragging ───────────────
+--// ─────────────── Dragging (main panel) ───────────────
 local dragging, dragStart, startPos
 track(frame.InputBegan:Connect(function(input)
     if unloaded then return end
@@ -650,13 +894,42 @@ track(UIS.InputChanged:Connect(function(input)
     end
 end))
 
+--// ─────────────── Dragging (floating button) ───────────────
+local fDragging, fDragStart, fStartPos
+track(floatBtn.InputBegan:Connect(function(input)
+    if unloaded then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        fDragging  = true
+        fDragStart = input.Position
+        fStartPos  = floatBtn.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                fDragging = false
+            end
+        end)
+    end
+end))
+
+track(UIS.InputChanged:Connect(function(input)
+    if unloaded or not fDragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+    or input.UserInputType == Enum.UserInputType.Touch then
+        local d = input.Position - fDragStart
+        floatBtn.Position = UDim2.new(
+            fStartPos.X.Scale, fStartPos.X.Offset + d.X,
+            fStartPos.Y.Scale, fStartPos.Y.Offset + d.Y)
+    end
+end))
+
 --// ─────────────── Update loop ───────────────
 local lastLogRefresh = 0
 track(Run.Heartbeat:Connect(function()
     if unloaded then return end
     local now = tick()
 
-    inGameLbl.Text = "In-game: " .. fmt(now - scriptStart)
+    -- Injected time uses os.time() (real-world clock) for persistence across re-execs
+    inGameLbl.Text = "Injected since: " .. fmt(os.time() - gameJoinTime)
 
     local since = now - lastInput
     if since < 1 then
