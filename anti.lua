@@ -763,7 +763,6 @@ Instance.new("UICorner", infoAccent).CornerRadius = UDim.new(1, 0)
 -- Info body content
 local infoLines = {
     { text = "Session & AFK Tracker",  color = Color3.fromRGB(255, 255, 255), bold = true,  size = 13 },
-    { text = "Built for executor use",  color = Color3.fromRGB(160, 162, 170), bold = false, size = 11 },
     { text = "",                        color = Color3.fromRGB(0, 0, 0),       bold = false, size = 6 },
     { text = "Creator's Discord: twin.e8", color = Color3.fromRGB(120, 160, 255), bold = true, size = 12 },
     { text = "",                        color = Color3.fromRGB(0, 0, 0),       bold = false, size = 6 },
