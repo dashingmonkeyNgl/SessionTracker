@@ -559,7 +559,7 @@ queueLabel.Font                  = Enum.Font.Gotham
 queueLabel.TextSize              = 13
 queueLabel.TextColor3            = Color3.fromRGB(225, 226, 232)
 queueLabel.TextXAlignment        = Enum.TextXAlignment.Left
-queueLabel.Text                  = "Queue on Teleport:"
+queueLabel.Text                  = "Auto Exec On Tp:"
 
 local queueBtn = Instance.new("TextButton", mainView)
 queueBtn.Size             = UDim2.new(0, 92, 0, 20)
